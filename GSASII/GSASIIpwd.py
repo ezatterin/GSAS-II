@@ -1578,6 +1578,28 @@ def setPeakInstPrmMode(normal=True):
     global peakInstPrmMode
     peakInstPrmMode = normal
 
+    
+def _posCorrShift(pos, parmDict):
+    '''Apply optional non-linear 2-theta correction:
+    pos -> pos + a*x^3 + b*x^2 + c*x (no constant term).
+
+    :returns: corrected position
+    '''
+    a = parmDict.get('XPoly3', 0.0)
+    b = parmDict.get('XPoly2', 0.0)
+    c = parmDict.get('XPoly1', 0.0)
+    return pos + ((a * pos + b) * pos + c) * pos
+
+
+def _posCorrDpos(pos, parmDict):
+    '''Derivative d(pos_corrected)/d(pos) for the non-linear 2-theta correction.'''
+    a = parmDict.get('XPoly3', 0.0)
+    b = parmDict.get('XPoly2', 0.0)
+    c = parmDict.get('XPoly1', 0.0)
+    return 1.0 + 3.0 * a * pos * pos + 2.0 * b * pos + c
+
+POS_CORR_NAMES = ('XPoly1','XPoly2','XPoly3')
+
 def getPeakProfile(dataType,parmDict,xdata,fixback,varyList,bakType):
     '''Computes the profiles from multiple peaks for individual peak fitting
     for powder patterns.
@@ -1647,7 +1669,8 @@ def getPeakProfile(dataType,parmDict,xdata,fixback,varyList,bakType):
         iPeak = 0
         while True:
             try:
-                pos = parmDict['pos'+str(iPeak)]
+                pos0 = parmDict['pos'+str(iPeak)]
+                pos = _posCorrShift(pos0,parmDict)
                 tth = (pos-parmDict['Zero'])
                 intens = parmDict['int'+str(iPeak)]
                 sigName = 'sig'+str(iPeak)
@@ -1699,7 +1722,7 @@ def getPeakProfile(dataType,parmDict,xdata,fixback,varyList,bakType):
                     fp = getExpFCJVoigt3(pos,alp,bet,sig,gam,shl,xdata[iBeg:iFin])[0]
                 yc[iBeg:iFin] += intens*fp
                 if Ka2:
-                    pos2 = pos+lamRatio*tand(pos/2.0)       # + 360/pi * Dlam/lam * tan(th)
+                    pos2 = _posCorrShift(pos0+lamRatio*tand(pos0/2.0),parmDict)       # + 360/pi * Dlam/lam * tan(th)
                     iBeg = np.searchsorted(xdata,pos2-fmin)
                     iFin = np.searchsorted(xdata,pos2+fmin)
                     if iBeg-iFin:
@@ -1865,7 +1888,9 @@ def getPeakProfileDerv(dataType,parmDict,xdata,fixback,varyList,bakType):
         iPeak = 0
         while True:
             try:
-                pos = parmDict['pos'+str(iPeak)]
+                pos0 = parmDict['pos'+str(iPeak)]
+                pos = _posCorrShift(pos0,parmDict)
+                dpos_dpos0 = _posCorrDpos(pos0,parmDict)
                 tth = (pos-parmDict['Zero'])
                 intens = parmDict['int'+str(iPeak)]
                 if 'C' not in dataType:
@@ -1936,7 +1961,7 @@ def getPeakProfileDerv(dataType,parmDict,xdata,fixback,varyList,bakType):
                     dMdpk[0][iBeg:iFin] += dMdipk[0]
                     dervDict = {'int':dMdpk[0],'pos':dMdpk[1],'alp':dMdpk[2],'bet':dMdpk[3],'sig':dMdpk[4],'gam':dMdpk[5],'shl':dMdpk[6]}
                 if Ka2:
-                    pos2 = pos+lamRatio*tand(pos/2.0)       # + 360/pi * Dlam/lam * tan(th)
+                    pos2 = _posCorrShift(pos0+lamRatio*tand(pos0/2.0),parmDict)       # + 360/pi * Dlam/lam * tan(th)
                     iBeg = np.searchsorted(xdata,pos2-fmin)
                     iFin = np.searchsorted(xdata,pos2+fmin)
                     if iBeg-iFin:
@@ -1964,7 +1989,10 @@ def getPeakProfileDerv(dataType,parmDict,xdata,fixback,varyList,bakType):
                 for parmName in ['pos','int','alp','bet','sig','gam','shl','L1/L2']:
                     try:
                         idx = varyList.index(parmName+str(iPeak))
-                        dMdv[idx] = dervDict[parmName]
+                        if parmName == 'pos':
+                            dMdv[idx] = dpos_dpos0*dervDict[parmName]
+                        else:
+                            dMdv[idx] = dervDict[parmName]
                     except ValueError:
                         pass
                 if 'U' in varyList:
@@ -1991,6 +2019,12 @@ def getPeakProfileDerv(dataType,parmDict,xdata,fixback,varyList,bakType):
                     dMdv[varyList.index('beta-1')] += dbdb1*dervDict['bet']
                 if 'I(L2)/I(L1)' in varyList:
                     dMdv[varyList.index('I(L2)/I(L1)')] += dervDict['L1/L2']
+                if 'XPoly1' in varyList:
+                    dMdv[varyList.index('XPoly1')] += pos0*dervDict['pos']
+                if 'XPoly2' in varyList:
+                    dMdv[varyList.index('XPoly2')] += pos0**2*dervDict['pos']
+                if 'XPoly3' in varyList:
+                    dMdv[varyList.index('XPoly3')] += pos0**3*dervDict['pos']
                 iPeak += 1
             except KeyError:        #no more peaks to process
                 break
@@ -2797,6 +2831,8 @@ def DoPeakFit(FitPgm,Peaks,Background,Limits,Inst,Inst2,data,fixback=None,prevVa
                 #     Inst[parm][2] = False
                 #     continue
                 insVary.append(parm)
+            elif parm in POS_CORR_NAMES and Inst[parm][2] and dataType[2] in ['A','B','C']:
+                insVary.append(parm)
         instDict = dict(zip(insNames,insVals))
         if 'SH/L' in instDict:
             instDict['SH/L'] = max(instDict['SH/L'],0.002)
@@ -2844,9 +2880,10 @@ def DoPeakFit(FitPgm,Peaks,Background,Limits,Inst,Inst2,data,fixback=None,prevVa
         ptlbls = 'names :'
         ptstr =  'values:'
         sigstr = 'esds  :'
+        showParms = ['U','V','W','X','Y','Z','SH/L','I(L2)/I(L1)','alpha','A','B','C',
+            'beta-0','beta-1','beta-q','sig-0','sig-1','sig-2','sig-q','alpha-0','alpha-1'] + list(POS_CORR_NAMES)
         for parm in Inst:
-            if parm in  ['U','V','W','X','Y','Z','SH/L','I(L2)/I(L1)','alpha','A','B','C',
-                'beta-0','beta-1','beta-q','sig-0','sig-1','sig-2','sig-q','alpha-0','alpha-1']:
+            if parm in  showParms:
                 ptlbls += "%s" % (parm.center(12))
                 ptstr += ptfmt % (Inst[parm][1])
                 if parm in sigDict:
@@ -3028,12 +3065,16 @@ def DoPeakFit(FitPgm,Peaks,Background,Limits,Inst,Inst2,data,fixback=None,prevVa
     parmDict.update(peakDict)
     parmDict['pdabc'] = []      #dummy Pdabc
     parmDict.update(Inst2)      #put in real one if there
+    for name in POS_CORR_NAMES:
+        parmDict.setdefault(name,0.0)
     if prevVaryList:
         varyList = prevVaryList[:]
     else:
         varyList = bakVary+insVary+peakVary
         if 'LF' in Inst['Type'][0] and Peaks:
             if Peaks[-1].get('clat-ref'): varyList += ['clat']
+    if dataType[2] not in ['A','B','C']:
+        varyList = [item for item in varyList if item not in POS_CORR_NAMES]
     fullvaryList = varyList[:]
     remVary = []
     if not peakInstPrmMode:
