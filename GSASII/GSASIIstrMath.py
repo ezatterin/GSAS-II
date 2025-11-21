@@ -3451,13 +3451,14 @@ def GetReflPos(refl,im,wave,A,pfx,hfx,phfx,calcControls,parmDict):
         d = 1./np.sqrt(G2lat.calc_rDsq(np.array([h,k,l]),A))
     refl[4+im] = d
     if calcControls[hfx+'histType'][2] in ['A','B','C']:
-        pos = 2.0*asind(wave/(2.0*d))
+        pos0 = 2.0*asind(wave/(2.0*d))
         const = 9.e-2/(np.pi*parmDict[hfx+'Gonio. radius'])                  #shifts in microns
         if 'Bragg' in calcControls[hfx+'instType']:           #trans(=1/mueff) in cm
-            pos -= const*(4.*parmDict[hfx+'Shift']*cosd(pos/2.0)+parmDict[hfx+'Transparency']*sind(pos)*100.0)
+            pos0 -= const*(4.*parmDict[hfx+'Shift']*cosd(pos0/2.0)+parmDict[hfx+'Transparency']*sind(pos0)*100.0)
         else:               #Debye-Scherrer - simple but maybe not right
-            pos -= 2.0*const*(parmDict[hfx+'DisplaceX']*cosd(pos)+(parmDict[hfx+'DisplaceY']+parmDict[phfx+'LayerDisp'])*sind(pos))
-        pos += parmDict[hfx+'Zero']
+            pos0 -= 2.0*const*(parmDict[hfx+'DisplaceX']*cosd(pos0)+(parmDict[hfx+'DisplaceY']+parmDict[phfx+'LayerDisp'])*sind(pos0))
+        pos0 += parmDict[hfx+'Zero']
+        pos = G2pwd._posCorrShift(pos0,parmDict)
     elif 'E' in calcControls[hfx+'histType']:
         pos = 12.397639/(2.0*d*sind(parmDict[hfx+'2-theta']/2.0))+parmDict[hfx+'ZE']+parmDict[hfx+'YE']*d+parmDict[hfx+'XE']*d**2
     elif 'T' in calcControls[hfx+'histType']:
@@ -3480,22 +3481,38 @@ def GetReflPosDerv(refl,im,wave,A,pfx,hfx,phfx,calcControls,parmDict):
     dst = np.sqrt(dstsq)
     dsp = 1./dst
     if calcControls[hfx+'histType'][2] in ['A','B','C']:
-        pos = refl[5+im]-parmDict[hfx+'Zero']
+        # compute uncorrected position (pos0) then apply polynomial correction
+        pos0 = 2.0*asind(wave/(2.0*dsp))
         const = dpr/np.sqrt(1.0-wave**2*dstsq/4.0)
         dpdw = const*dst
         dpdA = np.array([h**2,k**2,l**2,h*k,h*l,k*l])*const*wave/(2.0*dst)
-        dpdZ = 1.0
         dpdV = np.array([2.*h*A[0]+k*A[3]+l*A[4],2*k*A[1]+h*A[3]+l*A[5],
             2*l*A[2]+h*A[4]+k*A[5]])*m*const*wave/(2.0*dst)
         shft = 9.e-2/(np.pi*parmDict[hfx+'Gonio. radius'])                  #shifts in microns
+        # sample displacement/transparency corrections use corrected position
+        pos_corr = G2pwd._posCorrShift(pos0,parmDict)
+        dpos_dpos0 = G2pwd._posCorrDpos(pos0,parmDict)
         if 'Bragg' in calcControls[hfx+'instType']:
-            dpdSh = -4.*shft*cosd(pos/2.0)
-            dpdTr = -shft*sind(pos)*100.0
-            return dpdA,dpdw,dpdZ,dpdSh,dpdTr,0.,0.,dpdV
+            dpdSh = -4.*shft*cosd(pos_corr/2.0)
+            dpdTr = -shft*sind(pos_corr)*100.0
+            dpdXd = dpdYd = 0.0
         else:               #Debye-Scherrer - simple but maybe not right
-            dpdXd = -2.0*shft*cosd(pos)
-            dpdYd = -2.0*shft*sind(pos)
-            return dpdA,dpdw,dpdZ,0.,0.,dpdXd,dpdYd,dpdV
+            dpdXd = -2.0*shft*cosd(pos_corr)
+            dpdYd = -2.0*shft*sind(pos_corr)
+            dpdSh = dpdTr = 0.0
+        # apply polynomial chain rule
+        dpdw *= dpos_dpos0
+        dpdA *= dpos_dpos0
+        dpdV *= dpos_dpos0
+        dpdSh *= dpos_dpos0
+        dpdTr *= dpos_dpos0
+        dpdXd *= dpos_dpos0
+        dpdYd *= dpos_dpos0
+        dpdZ = dpos_dpos0
+        dpdXC1 = pos0
+        dpdXC2 = pos0**2
+        dpdXC3 = pos0**3
+        return dpdA,dpdw,dpdZ,dpdSh,dpdTr,dpdXd,dpdYd,dpdV,dpdXC1,dpdXC2,dpdXC3
     elif 'E' in calcControls[hfx+'histType']:
         tth = parmDict[hfx+'2-theta']/2.0
         dpdZE = 1.0
@@ -4378,12 +4395,13 @@ def getPowderProfileDerv(args):
                 except: # ValueError:
                     pass
             if histType[2] in ['A','B','C']:
-                dpdA,dpdw,dpdZ,dpdSh,dpdTr,dpdX,dpdY,dpdV = GetReflPosDerv(refl,im,wave,A,pfx,hfx,phfx,calcControls,parmDict)
+                dpdA,dpdw,dpdZ,dpdSh,dpdTr,dpdX,dpdY,dpdV,dpdXC1,dpdXC2,dpdXC3 = GetReflPosDerv(refl,im,wave,A,pfx,hfx,phfx,calcControls,parmDict)
                 names = {hfx+'Scale':[dIdsh,'int'],hfx+'Polariz.':[dIdpola,'int'],phfx+'Scale':[dIdsp,'int'],
                     hfx+'U':[tanth**2,'sig'],hfx+'V':[tanth,'sig'],hfx+'W':[1.0,'sig'],
                     hfx+'X':[1.0/costh,'gam'],hfx+'Y':[tanth,'gam'],hfx+'Z':[1.0,'gam'],
                     hfx+'I(L2)/I(L1)':[1.0,'L1/L2'],hfx+'Zero':[dpdZ,'pos'],hfx+'Lam':[dpdw,'pos'],
-                    phfx+'Extinction':[dFdEx,'int'],phfx+'LayerDisp':[dpdY,'pos']}
+                    phfx+'Extinction':[dFdEx,'int'],phfx+'LayerDisp':[dpdY,'pos'],
+                    hfx+'XPoly1':[dpdXC1,'pos'],hfx+'XPoly2':[dpdXC2,'pos'],hfx+'XPoly3':[dpdXC3,'pos'],}
                 if histType[2] in['A','C']:
                     names.update({hfx+'SH/L':[1.0,'shl']})
                 if histType[2] in ['A','B']:
